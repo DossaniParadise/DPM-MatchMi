@@ -252,6 +252,11 @@ table.grid{width:100%; border-collapse:collapse; min-width:760px}
 .cal-dcount{font-size:.66rem; font-weight:800; color:var(--red)}
 .cal-dsaved{font-size:.64rem; font-weight:800; color:#fff; background:var(--saved); border-radius:9px; padding:1px 6px}
 .okc{color:var(--saved)}
+.mini-table .act button.danger{color:var(--red); border-color:#f3c6cb}
+.mini-table .act button.danger:hover{background:#fdeaec}
+.mini-table tr.dim td{opacity:.55}
+.btn.danger{background:var(--red); border-color:var(--red); color:#fff}
+.btn.danger:hover{filter:brightness(.94)}
 .row-edit{border:1px solid transparent; background:none; color:var(--muted); cursor:pointer; font-size:.82rem; line-height:1;
   padding:2px 5px; border-radius:6px; opacity:0; transition:opacity .12s}
 tr:hover .row-edit, .tile:hover .row-edit, .row-edit:focus{opacity:1}
@@ -1520,17 +1525,76 @@ function mergeWizard() {
 function renderAdminVendors() {
   const list = Object.entries(state.vendors).sort((a,b) => a[1].name.localeCompare(b[1].name));
   $("adminBody").innerHTML = `
-    <div class="note">Adding a vendor is <b>forward-only</b>: pick the stores it bills, and it starts counting from this month. Past months never change.</div>
+    <div class="note">Adding a vendor is <b>forward-only</b>: pick the stores it bills, and it starts counting from this month. Past months never change. Removing works the same way — it stops future months only, and never deletes history.</div>
     <button class="btn primary" id="addVendorBtn">Add vendor…</button>
     <table class="mini-table"><thead><tr><th>Vendor</th><th>Active accounts</th><th></th></tr></thead>
     <tbody>${list.map(([id,v]) => {
       const n = Object.values(state.accounts).filter(a => a.vendorId === id && !a.activeTo).length;
-      return `<tr><td>${esc(v.name)}</td><td>${n}</td>
-        <td class="act"><button data-ext="${esc(id)}">Add to stores…</button> <button data-cons="${esc(id)}">Consolidate…</button></td></tr>`;
+      const ended = !n && Object.values(state.accounts).some(a => a.vendorId === id);
+      return `<tr${ended ? ' class="dim"' : ""}><td>${esc(v.name)}${ended ? ' <span class="acct">· stopped</span>' : ""}</td><td>${n}</td>
+        <td class="act"><button data-ext="${esc(id)}">Add to stores…</button> <button data-cons="${esc(id)}">Consolidate…</button> <button data-del="${esc(id)}" class="danger">Remove…</button></td></tr>`;
     }).join("")}</tbody></table>`;
   $("addVendorBtn").addEventListener("click", () => vendorWizard(null));
   $("adminBody").querySelectorAll("[data-ext]").forEach(b => b.addEventListener("click", () => vendorWizard(b.dataset.ext)));
   $("adminBody").querySelectorAll("[data-cons]").forEach(b => b.addEventListener("click", () => consolidateWizard(b.dataset.cons)));
+  $("adminBody").querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", () => removeVendorWizard(b.dataset.del)));
+}
+
+/** Remove a vendor going forward. History is never touched: this only sets an end month
+    on its accounts, so past months keep their rows, marks and counts. Fully reversible. */
+function removeVendorWizard(vendorId) {
+  const v = state.vendors[vendorId];
+  const ymNow = realYm();
+  const [ry, rm] = ymNow.split("-").map(Number);
+  const nextYm = ymKey(rm === 12 ? ry + 1 : ry, rm === 12 ? 1 : rm + 1);
+  const accts = Object.entries(state.accounts).filter(([, a]) => a.vendorId === vendorId);
+  const active = accts.filter(([, a]) => !a.activeTo || a.activeTo >= ymNow);
+  const ids = new Set(accts.map(([id]) => id));
+  let marks = 0; const months = new Set();
+  for (const [ym, doc] of Object.entries(state.statusByYm))
+    for (const aid of Object.keys(doc.entries || {}))
+      if (ids.has(aid) && doc.entries[aid].v) { marks++; months.add(ym); }
+  const stores = new Set(accts.map(([, a]) => a.storeId)).size;
+
+  if (!active.length) {
+    openModal(`<h2>Remove ${esc(v.name)}?</h2>
+      <div class="sub">This vendor already has no active accounts — nothing is being expected from it.</div>
+      <div class="actions"><button class="btn" id="rvCancel">Close</button></div>`);
+    $("rvCancel").addEventListener("click", () => openAdmin("vendors"));
+    return;
+  }
+
+  openModal(`
+    <h2>Remove ${esc(v.name)}?</h2>
+    <div class="sub">${accts.length} account${accts.length === 1 ? "" : "s"} across ${stores} store${stores === 1 ? "" : "s"}${marks ? ` · <b>${marks}</b> saved mark${marks === 1 ? "" : "s"} in ${months.size} month${months.size === 1 ? "" : "s"} of ${state.ui.year}` : ""}.</div>
+    <div class="note"><b>Forward-only.</b> ${active.length} active account${active.length === 1 ? "" : "s"} will stop being expected after <b>${ymNow}</b>:
+      <ul style="margin:6px 0 0 18px; padding:0">
+        <li>Every month up to and including ${ymNow} keeps its rows, marks and counts — unchanged.</li>
+        <li>${nextYm} onward won't count ${esc(v.name)} at all.</li>
+        <li>Nothing is deleted. To bring it back, clear "Tracked until" on its accounts (Manage → Accounts).</li>
+      </ul></div>
+    <label style="margin-top:12px">Last month to expect it</label>
+    <input type="text" id="rvUntil" value="${ymNow}" placeholder="YYYY-MM">
+    <div class="actions">
+      <button class="btn" id="rvCancel">Cancel — change nothing</button>
+      <button class="btn danger" id="rvStop">Stop after this month</button>
+    </div>`, true);
+
+  $("rvCancel").addEventListener("click", () => openAdmin("vendors"));
+  $("rvStop").addEventListener("click", async () => {
+    const until = ($("rvUntil").value.trim().match(/^\d{4}-\d{2}$/) || [ymNow])[0];
+    if (until < ymNow && !confirm(`${until} is earlier than this month.\n\nMonths after ${until} would stop expecting ${v.name}, so a past month's count can drop. Saved marks are never removed.\n\nUse ${until} anyway?`)) return;
+    if (!confirm(`Stop expecting ${v.name} after ${until}?\n\n• ${active.length} account(s) end ${until}\n• Every month up to and including ${until} stays exactly as it is\n• Nothing is deleted — this can be undone`)) return;
+    try {
+      for (let i = 0; i < active.length; i += 400) {
+        const batch = fb.writeBatch(fb.db);
+        active.slice(i, i + 400).forEach(([id]) => batch.set(fb.doc(fb.db, "accounts", id), { activeTo: until }, { merge: true }));
+        await batch.commit();
+      }
+      toast(`${v.name} stops after ${until}. All history kept.`);
+      openAdmin("vendors");
+    } catch (e) { toast("Couldn't save — " + explainError(e), true); DIAG.err("vendor-stop", e.code || e.message); }
+  });
 }
 
 /** Consolidated billing: from a start month, ONE invoice covers the selected stores.
