@@ -252,6 +252,7 @@ table.grid{width:100%; border-collapse:collapse; min-width:760px}
 .cal-dcount{font-size:.66rem; font-weight:800; color:var(--red)}
 .cal-dsaved{font-size:.64rem; font-weight:800; color:#fff; background:var(--saved); border-radius:9px; padding:1px 6px}
 .okc{color:var(--saved)}
+.badge-book.badge-legacy{background:#f4f1e8; color:#8a7a4e; cursor:help}
 .mini-table .act button.danger{color:var(--red); border-color:#f3c6cb}
 .mini-table .act button.danger:hover{background:#fdeaec}
 .mini-table tr.dim td{opacity:.55}
@@ -377,7 +378,7 @@ tr:hover .row-edit, .tile:hover .row-edit, .row-edit:focus{opacity:1}
 
   <div class="toolbar">
     <input type="search" id="q" placeholder="Search vendor, store, or account #" aria-label="Search">
-    <select id="fBook" aria-label="Filter by log"></select>
+    <select id="fBook" aria-label="Filter by entity"></select>
     <select id="fStore" aria-label="Filter by store"></select>
     <select id="fVendor" aria-label="Filter by vendor"></select>
     <select id="fStatus" aria-label="Filter by status">
@@ -391,6 +392,7 @@ tr:hover .row-edit, .tile:hover .row-edit, .row-edit:focus{opacity:1}
       <option value="store">Group: store</option>
       <option value="date">Group: date</option>
       <option value="status">Group: status</option>
+      <option value="entity">Group: entity</option>
     </select>
     <div class="seg" role="group" aria-label="View">
       <button id="vwCal" class="on">Calendar</button>
@@ -486,6 +488,8 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const MAX_CHIPS = 4;
+const PLACEHOLDER_ENTITY = /^(fast food \(bk\)|bk|dpr)$/i;   // migrated workbook labels, not real entities
+const _tagCache = {};   // entity name -> short badge tag
 const NON_BK_WORDS = /paradise|quick\s*stop|car\s*wash|travel\s*stop|subway|grocery|grill|market|exxon|sonic|shell|valero/i;
 const ymKey = (y, m) => `${y}-${String(m).padStart(2,"0")}`;
 const slug = (s) => String(s||"").normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"") || "x";
@@ -757,6 +761,32 @@ function storeSortKey(name) {
   return (p.city || raw).toLowerCase() + " " + p.num;
 }
 function cmpStore(a, b) { return storeSortKey(a).localeCompare(storeSortKey(b)); }
+
+/** The legal entity that owns a store, straight from FindMi. Falls back to the old
+    workbook name (BK/DPR) only until the entities have been synced. */
+function entityOfAccount(a) {
+  const s = state.stores[a.storeId];
+  const e = s && s.entity ? String(s.entity).trim() : "";
+  if (e && !PLACEHOLDER_ENTITY.test(e)) return e;
+  return "";
+}
+/** Short tag for the row badge: "Dossani Paradise Restaurants, LLC." -> DPR. */
+function entityTag(entity) {
+  if (!entity) return "";
+  if (_tagCache[entity]) return _tagCache[entity];
+  const words = entity
+    .replace(/[.,]/g, " ")
+    .replace(/\b(llc|l\s*l\s*c|inc|incorporated|ltd|limited|corp|corporation|company|co|the)\b/ig, " ")
+    .split(/\s+/).filter(Boolean);
+  let tag = words.map(w => w === "&" ? "" : w[0]).join("").toUpperCase().slice(0, 4);
+  if (!tag) tag = entity.slice(0, 3).toUpperCase();
+  return (_tagCache[entity] = tag);
+}
+function badgeFor(a) {
+  const e = entityOfAccount(a);
+  if (e) return `<span class="badge-book" title="${esc(e)}">${esc(entityTag(e))}</span>`;
+  return a.book ? `<span class="badge-book badge-legacy" title="From the ${esc(a.book)} workbook — run Manage → Stores → Standardize names to pull the real entity from FindMi">${esc(a.book)}</span>` : "";
+}
 function backdateOk(from) {
   if (from >= realYm()) return true;
   return confirm(`Heads up: ${from} is in the past.\n\nStarting tracking from ${from} makes past months EXPECT this — they'll show extra "missing" until marked. Nothing already saved is ever changed; only the expected counts grow.\n\nStart from ${from} anyway? (Cancel to go back and use ${realYm()}.)`);
@@ -777,7 +807,7 @@ function monthStats(ym, filterFn) {
 
 function passesFilters(acc, aid, ym) {
   const u = state.ui;
-  if (u.fBook && acc.book !== u.fBook) return false;
+  if (u.fBook && (entityOfAccount(acc) || acc.book) !== u.fBook) return false;
   if (u.fStore && acc.storeId !== u.fStore && !(acc.storeIds || []).includes(u.fStore)) return false;
   if (u.fVendor && acc.vendorId !== u.fVendor) return false;
   if (u.fStatus && aid !== undefined) {
@@ -842,7 +872,8 @@ function renderMonthRail() {
 
 function renderFilters() {
   const books = [...new Set(Object.values(state.accounts).map(a => a.book))].sort();
-  fillSelect($("fBook"), books.map(b => [b, "Log: " + b]), state.ui.fBook, "All logs");
+  const ents = [...new Set(Object.values(state.accounts).map(a => entityOfAccount(a) || a.book).filter(Boolean))].sort();
+  fillSelect($("fBook"), ents.map(e => [e, PLACEHOLDER_ENTITY.test(e) ? "Log: " + e : e]), state.ui.fBook, "All entities");
   const stores = Object.entries(state.stores).filter(([,s]) => !s.mergedInto).sort((a,b) => cmpStore(a[1].name, b[1].name));
   fillSelect($("fStore"), stores.map(([id,s]) => [id, dspStore(s.name)]), state.ui.fStore, "All stores");
   const vendors = Object.entries(state.vendors).sort((a,b) => a[1].name.localeCompare(b[1].name));
@@ -904,6 +935,7 @@ function groupKeyOf(aid, a, ym) {
       return r ? { k: `Day ${String(r.d1).padStart(2,"0")}${r.d2>r.d1 ? "–"+String(r.d2).padStart(2,"0") : ""}`, w: 0 }
                : { k: "No set day", w: 1 };
     }
+    case "entity": return { k: entityOfAccount(a) || ("Log: " + (a.book || "—")), w: 0 };
     case "status": {
       const v = statusOf(aid, ym);
       return { k: v === "Y" ? "Saved" : v === "N" ? "Marked N — not available yet" : "Pending", w: statusWeight(v) };
@@ -1034,7 +1066,7 @@ function renderTiles(rows, ym) {
     const v = statusOf(aid, ym);
     const r = parseRange(a.estReceival);
     html += `<div class="tile ${statusCls(v)}" data-acc="${esc(aid)}" role="button" tabindex="0">
-      <div class="t-vendor"><span class="nm">${esc(a.vendor)}</span>${a.book ? `<span class="badge-book">${esc(a.book)}</span>` : ""}
+      <div class="t-vendor"><span class="nm">${esc(a.vendor)}</span>${badgeFor(a)}
         <button class="row-edit" data-edit-acc="${esc(aid)}" title="Edit this account">✎</button></div>
       <div class="t-store">${esc(dspStore(a.store))}</div>
       <div class="t-acct">${esc(a.accountNumber || "…" + a.last4)}</div>
@@ -1071,7 +1103,7 @@ function renderList(rows, ym) {
     const meta = v ? `${esc((mark.by||"").split("@")[0])} · ${fmtWhen(mark.at)}` : "";
     html += `<tr>
       <td><button class="row-edit" data-edit-acc="${esc(aid)}" title="Edit ${esc(a.vendor)} — account #, estimate dates, tracking">✎</button>
-        ${esc(a.vendor)} ${a.book ? `<span class="badge-book">${esc(a.book)}</span>` : ""}</td>
+        ${esc(a.vendor)} ${badgeFor(a)}</td>
       <td>${esc(dspStore(a.store))}</td>
       <td class="acct" title="${esc(a.accountNumber)}">${esc(a.accountNumber || ("…" + a.last4))}</td>
       <td class="est">${esc(a.estReceival)}</td>
@@ -1103,10 +1135,11 @@ function buildAccountModal({ aid, cyc }, fresh) {
   const v = mark?.v || "";
   const meta = v ? `Marked ${v} by ${esc((mark.by||"").split("@")[0])} · ${fmtWhen(mark.at)}` : "Not marked yet this month.";
   const html = `
-    <h2>${esc(a.vendor)} ${a.book ? `<span class="badge-book">${esc(a.book)}</span>` : ""}</h2>
+    <h2>${esc(a.vendor)} ${badgeFor(a)}</h2>
     <div class="sub">${esc(MONTH_NAMES[+ym.slice(5)-1])} ${+ym.slice(0,4)}'s invoice${a.consolidated ? " — consolidated: one invoice covers " + (a.storeIds||[]).length + " stores" : ""}</div>
     <dl class="acc-facts">
       <dt>Store</dt><dd>${esc(dspStore(a.store))}</dd>
+      ${entityOfAccount(a) ? `<dt>Entity</dt><dd>${esc(entityOfAccount(a))}</dd>` : ""}
       <dt>Account #</dt><dd>${esc(a.accountNumber || "…" + a.last4)}</dd>
       <dt>Est. receival</dt><dd>${esc(a.estReceival || "—")}</dd>
       <dt>Est. invoice</dt><dd>${esc(a.estInvoice || "—")}</dd>
@@ -1149,7 +1182,7 @@ function buildDayModal(d, fresh) {
   const rowsHtml = list.map(([aid, a, r, cyc, sfx]) => {
     const v = statusOf(aid, cyc);
     return `<div class="dm-row">
-      <div class="who"><b>${esc(a.vendor)}</b> ${a.book ? `<span class="badge-book">${esc(a.book)}</span>` : ""} · ${esc(dspStore(a.store))}${sfx ? ` <span class="acct">(${esc(sfx)})</span>` : ""}
+      <div class="who"><b>${esc(a.vendor)}</b> ${badgeFor(a)} · ${esc(dspStore(a.store))}${sfx ? ` <span class="acct">(${esc(sfx)})</span>` : ""}
         <div class="acct">${esc(a.accountNumber || "…" + a.last4)}</div></div>
       <div class="est">est. ${rangeLabel(r)}</div>
       <div class="stamp">
@@ -1210,11 +1243,11 @@ function setView(v){ state.ui.view = v; renderMain(); }
 
 function exportCsv() {
   const ym = ymKey(state.ui.year, state.ui.month);
-  const rows = [["Month","Log","Vendor","Store","Account#","Est Receival","Est Invoice","Est Due","Status","By","When"]];
+  const rows = [["Month","Entity","Vendor","Store","Account#","Est Receival","Est Invoice","Est Due","Status","By","When"]];
   for (const [aid, a] of Object.entries(state.accounts)) {
     if (!isActive(a, ym) || !passesFilters(a, aid, ym)) continue;
     const m = markOf(aid, ym);
-    rows.push([ym, a.book, a.vendor, dspStore(a.store), a.accountNumber, a.estReceival, a.estInvoice, a.estDue, m?.v || "", m?.by || "", fmtWhen(m?.at)]);
+    rows.push([ym, entityOfAccount(a) || a.book, a.vendor, dspStore(a.store), a.accountNumber, a.estReceival, a.estInvoice, a.estDue, m?.v || "", m?.by || "", fmtWhen(m?.at)]);
   }
   const csv = rows.map(r => r.map(c => `"${String(c ?? "").replace(/"/g,'""')}"`).join(",")).join("\r\n");
   const a = document.createElement("a");
@@ -1299,7 +1332,9 @@ function storeWizard(editId) {
     <div class="row3">
       <div><label>Store name</label><input type="text" id="stName" value="${esc(s.name)}"></div>
       <div><label>Store number</label><input type="text" id="stNumber" value="${esc(editId ? (storeParts(s.name).num || s.number || "") : "")}" placeholder="e.g. 26924"></div>
-      <div><label>Entity</label><input type="text" id="stEntity" value="${esc(s.entity || "")}" placeholder="e.g. DPR"></div>
+      <div><label>Entity <span class="acct">(legal owner, from FindMi)</span></label>
+        <input type="text" id="stEntity" list="entityList" value="${esc(s.entity || "")}" placeholder="e.g. Dossani Paradise Restaurants, LLC.">
+        <datalist id="entityList">${[...new Set(Object.values(state.stores).map(x => x.entity).filter(e => e && !PLACEHOLDER_ENTITY.test(e)))].sort().map(e => `<option value="${esc(e)}">`).join("")}</datalist></div>
     </div>
     <label>Brand <span class="acct">(controls how the name is displayed everywhere)</span></label>
     <select id="stBrand">
@@ -1393,18 +1428,23 @@ async function standardizeWizard() {
     return;
   }
   const d = diffFindmi(fmList);
-  const rows = d.matched.filter(m => m.numFill || m.brandFill);
+  d.matched.forEach(m => {
+    const cur = (state.stores[m.sid].entity || "").trim();
+    // replace the migrated workbook label with FindMi's real legal entity
+    if (m.fm.entity && (!cur || PLACEHOLDER_ENTITY.test(cur)) && cur !== m.fm.entity) m.entityFill = m.fm.entity;
+  });
+  const rows = d.matched.filter(m => m.numFill || m.brandFill || m.entityFill);
   const stillBare = Object.entries(state.stores).filter(([sid, s]) =>
     !s.mergedInto && brandOf(s, sid) === "BK" && !(storeParts(s.name).num || s.number)
     && !rows.some(m => m.sid === sid));
   $("modalBox").className = "modal wide";
   $("modalBox").innerHTML = `
     <h2>Standardize store names</h2>
-    <div class="sub">Fills in the store number and brand that FindMi knows, so every Burger King reads <b>BK City #Number</b>. This only changes how names are <i>displayed</i> — no accounts, no marks, no counts.</div>
+    <div class="sub">Pulls the store number, brand and <b>legal entity</b> from FindMi, so every Burger King reads <b>BK City #Number</b> and each row is tagged with its real entity instead of the old BK/DPR workbook label. Display only — no accounts, no marks, no counts change.</div>
     ${rows.length ? `<div class="fm-sec"><h4>Will be completed (${rows.length})</h4>
       ${rows.map(m => { const s = state.stores[m.sid];
         return `<div class="fm-row"><span class="grow">${esc(s.name)}</span>
-          <span class="how">→ <b>${esc(m.numFill ? dspStore(s.name).replace(/\s*#\d+$/, "") + " #" + m.numFill : dspStore(s.name))}</b>${m.brandFill && m.brandFill !== "BK" ? " (other brand — left as typed)" : ""}</span></div>`;
+          <span class="how">→ <b>${esc(m.numFill ? dspStore(s.name).replace(/\s*#\d+$/, "") + " #" + m.numFill : dspStore(s.name))}</b>${m.brandFill && m.brandFill !== "BK" ? " (other brand — left as typed)" : ""}${m.entityFill ? ` · entity <b>${esc(m.entityFill)}</b>` : ""}</span></div>`;
       }).join("")}</div>` : `<div class="fm-sec"><h4>Nothing to fill</h4><div class="fm-row">Every matched store already has its number and brand.</div></div>`}
     ${stillBare.length ? `<div class="fm-sec"><h4>FindMi has no number for these (${stillBare.length})</h4>
       <div class="fm-row"><span class="how">Set them by hand in Stores → Edit → Store number: ${stillBare.map(([, s]) => esc(s.name)).join(", ")}</span></div></div>` : ""}
@@ -1421,6 +1461,7 @@ async function standardizeWizard() {
         const upd = {};
         if (m.numFill) upd.number = m.numFill;
         if (m.brandFill) upd.brand = m.brandFill;
+        if (m.entityFill) upd.entity = m.entityFill;
         if (m.needsLink) upd.findmiId = m.fm.fmId;
         batch.set(fb.doc(fb.db, "stores", m.sid), upd, { merge: true });
       });
@@ -1676,7 +1717,7 @@ function vendorWizard(vendorId) {
     <label>Tracking starts</label><input type="text" id="vwFrom" value="${ymNow}">
     <details style="margin-top:8px">
       <summary style="cursor:pointer; font-size:.76rem; color:var(--muted)">Which invoice log? (set automatically — open only if you need to override)</summary>
-      <div class="note" style="margin-top:6px">Your invoices were tracked in two logs, <b>BK</b> and <b>DPR</b>, one per entity — it's the small badge on each row and the "All logs" filter. Each new account is filed by its store's entity, which is right in almost every case.</div>
+      <div class="note" style="margin-top:6px">Your invoices came from two workbooks, <b>BK</b> and <b>DPR</b>. It's only bookkeeping for where a row originated — the row badge and filter now show the store's real legal entity instead. Leave this on automatic unless you have a reason not to.</div>
       <select id="vwBook">
         <option value="auto">Automatic — file each account by its store's entity</option>
         <option value="BK">Force BK for all of them</option>
@@ -1769,7 +1810,7 @@ function accountForm(editId, backTo) {   // backTo: "grid" returns to the month 
     </div>
     <div class="row2">
       <div><label>Account #</label><input type="text" id="afAcct" value="${esc(a.accountNumber)}"></div>
-      <div><label>Invoice log <span class="acct">(BK or DPR entity)</span></label><select id="afBook">${books.map(b => `<option ${b===a.book?"selected":""}>${esc(b)}</option>`).join("")}</select></div>
+      <div><label>Source workbook <span class="acct">(BK or DPR — bookkeeping only)</span></label><select id="afBook">${books.map(b => `<option ${b===a.book?"selected":""}>${esc(b)}</option>`).join("")}</select></div>
     </div>
     <div class="row3">
       <div><label>Est. receival (day of month)</label><input type="text" id="afRcv" value="${esc(a.estReceival)}" placeholder="e.g. 22-23, or 5 next month"></div>
